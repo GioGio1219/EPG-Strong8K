@@ -1,0 +1,117 @@
+name: Update EPG
+
+on:
+  schedule:
+    # Corre a cada 8h. O guia só é refeito quando o publicado tem >= MIN_HOURS,
+    # logo a atualização acontece sempre entre 24h e ~32h depois da anterior.
+    - cron: "17 */8 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Forçar atualização (ignora a idade do guia)"
+        type: boolean
+        default: true
+
+env:
+  MIN_HOURS: 24          # idade mínima do guia para voltar a gerar
+  DAYS: 3                # dias de programação a descarregar
+  MAX_CONNECTIONS: 5     # pedidos simultâneos (valores altos podem causar bloqueios)
+  MIN_PROGRAMMES: 200    # se o guia tiver menos programas, NÃO publica (protege o guia anterior)
+
+concurrency:
+  group: epg-update
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.age.outputs.run }}
+    steps:
+      - name: Verificar idade do guia publicado
+        id: age
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force }}" = "true" ]; then
+            echo "Execução manual forçada."; echo "run=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/last_update.txt"
+          LAST="$(curl -fsS --max-time 20 "$URL" 2>/dev/null || echo 0)"
+          [[ "$LAST" =~ ^[0-9]+$ ]] || LAST=0
+          AGE=$(( $(date +%s) - LAST ))
+          echo "Idade do guia: $(( AGE / 3600 ))h (mínimo: ${MIN_HOURS}h)"
+          if [ "$AGE" -ge $(( MIN_HOURS * 3600 )) ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Clonar iptv-org/epg
+        run: git clone --depth 1 -b master https://github.com/iptv-org/epg.git upstream
+
+      - name: Instalar dependências
+        working-directory: upstream
+        run: npm install --no-audit --no-fund
+
+      - name: Juntar listas de canais (config/channels.txt)
+        run: python3 scripts/merge_channels.py config/channels.txt upstream upstream/merged.channels.xml
+
+      - name: Gerar guia
+        working-directory: upstream
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/public"
+          npm run grab --- \
+            --channels=merged.channels.xml \
+            --output="$GITHUB_WORKSPACE/public/guide.xml" \
+            --days="$DAYS" \
+            --maxConnections="$MAX_CONNECTIONS" \
+            --timeout=30000
+
+      - name: Validar e preparar ficheiros
+        run: |
+          test -s public/guide.xml || { echo "guide.xml vazio"; exit 1; }
+          N=$(grep -c "<programme " public/guide.xml || true)
+          echo "Programas no guia: $N"
+          if [ "$N" -lt "$MIN_PROGRAMMES" ]; then
+            echo "::error::Guia com poucos programas ($N < $MIN_PROGRAMMES). Publicação cancelada."
+            exit 1
+          fi
+          gzip -9 -k -f public/guide.xml
+          date +%s > public/last_update.txt
+          cat > public/index.html <<HTML
+          <!doctype html><meta charset="utf-8"><title>EPG</title>
+          <h1>EPG</h1>
+          <p>Atualizado em: $(date -u '+%Y-%m-%d %H:%M UTC') &middot; Programas: $N</p>
+          <ul>
+            <li><a href="guide.xml">guide.xml</a></li>
+            <li><a href="guide.xml.gz">guide.xml.gz</a></li>
+          </ul>
+          HTML
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
