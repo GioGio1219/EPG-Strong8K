@@ -1,0 +1,13 @@
+# Uma linha por ficheiro *.channels.xml (suporta *). Linhas com # são ignoradas.
+# Caminhos relativos ao repositório iptv-org/epg (pasta "sites") ou à pasta "custom/" deste repositório.
+# A ordem conta: se o mesmo canal (xmltv_id) aparecer em várias fontes, vale a primeira.
+
+# --- Portugal (exemplo) ---
+sites/meo.pt/meo.pt.channels.xml
+sites/nostv.pt/nostv.pt.channels.xml
+sites/vodafone.pt/vodafone.pt.channels.xml
+sites/rtp.pt/rtp.pt.channels.xml
+sites/sporttv.pt/sporttv.pt.channels.xml
+
+# --- Os seus próprios canais (ficheiros em custom/) ---
+# custom/*.channels.xml
